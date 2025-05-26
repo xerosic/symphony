@@ -1,12 +1,34 @@
-# 🎼 Symphony - No fuss self-hostable Discord musicbot 
+<div align="center">
 
-Symphony is a simple self-hostable Discord musicbot that can play music from YouTube and Soundcloud.
+# 🎼 Symphony 
+### *No-fuss self-hostable Discord music bot*
 
-## Installation
+![Python](https://img.shields.io/badge/python-3.12+-blue.svg)
+![Discord.py](https://img.shields.io/badge/discord.py-2.0+-blue.svg)
+![License](https://img.shields.io/badge/license-MIT-green.svg)
+![Docker](https://img.shields.io/badge/docker-supported-blue.svg)
 
-### Option 1: Using Pre-built Docker Image (Recommended)
+*Bring YouTube and SoundCloud music directly in your favourite Discord server*
 
-1. Create a `docker-compose.yml` file:
+</div>
+
+> [!NOTE]
+> 🎉 **Symphony v1.0 is now available!** Featuring new audio sources (SoundCloud), more robust Queue system and more commands.
+
+## ✨ Features
+
+- 🎵 **Multi-platform support** - Play music from YouTube and SoundCloud
+- 📊 **Bot statistics** - Monitor uptime, CPU usage, and server count
+- 🔧 **Self-hostable** - Full control over your music bot
+- 🐳 **Docker ready** - Easy deployment with pre-built images
+
+
+## 🚀 Quick Start
+
+### Option 1: Docker (Recommended)
+
+Create a `docker-compose.yml` file:
+
 ```yaml
 version: '3.8'
 services:
@@ -18,58 +40,60 @@ services:
     restart: unless-stopped
 ```
 
-2. Run the bot:
+Launch the bot:
 ```bash
 docker-compose up -d
 ```
 
 ### Option 2: Run from Source
 
-1. Clone the repository
-2. Rename the `.env.example` file to `.env`
+1. **Clone & Setup**
+   ```bash
+   git clone https://github.com/xerosic/symphony.git
+   cd symphony
+   mv .env.example .env
+   ```
 
-```bash
-cp .env.example .env
+2. **Configure**
+   - Edit `.env` file with your Discord bot token
+
+3. **Install & Run**
+   ```bash
+   pip install -r requirements.txt
+   python main.py
+   ```
+
+## 🎮 Commands
+
+| Command   | Description                           | Usage                      |
+| --------- | ------------------------------------- | -------------------------- |
+| `/play`   | Play music from YouTube or SoundCloud | `/play <query> <provider>` |
+| `/skip`   | Skip to the next song                 | `/skip`                    |
+| `/pause`  | Pause current playback                | `/pause`                   |
+| `/resume` | Resume paused playback                | `/resume`                  |
+| `/stop`   | Stop playing and clear queue          | `/stop`                    |
+| `/volume` | Set playback volume (0-100)           | `/volume <number>`         |
+| `/leave`  | Disconnect from voice channel         | `/leave`                   |
+| `/stats`  | Display bot statistics                | `/stats`                   |
+
+## 🎯 Usage Examples
+
+```
+/play Never Gonna Give You Up youtube
+/play https://www.youtube.com/watch?v=wJv52fsVjaM youtube
+/play Chill beats soundcloud
+/volume 75
+/skip
 ```
 
-3. Modify the `.env` file with your Discord bot token
-4. Install dependencies:
+## 🐳 Docker Images
 
-```bash
-pip install -r requirements.txt
-```
-5. Run the bot:
+Pre-built Docker images are automatically published to GitHub Container Registry:
 
-```bash
-python main.py
-```
-
-## Usage
-
-_The bot supports slash commands_
-
-- `/play <query> <provider>`: Play a song from YouTube or Soundcloud (both URL and query are supported), where `<provider>` can be `youtube` or `soundcloud`.
-  
-- `/skip`: Skip the current song
-- 
-- `/pause`: Pause the current song
-
-- `/resume`: Resume the current song
-
-- `/stop`: Stop the current song
-
-- `/leave`: Leave the voice channel
-
-- `/volume`: Set the volume of the bot (0-100)
-
-- `/stats`: Display bot statistics (uptime, servers, cpu usage, ...)
-  
-## Docker Images
-
-Pre-built Docker images are automatically published to GitHub Container Registry on every commit:
 - `ghcr.io/xerosic/symphony:latest` - Latest stable version
 - `ghcr.io/xerosic/symphony:main` - Latest main branch
 
-## License
+
+## 📝 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
