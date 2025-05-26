@@ -61,6 +61,21 @@ async def get_audio_source(
         return source
 
 
+async def get_track_from_query(query: str, provider: str = "auto") -> TrackRequestItem:
+    if provider == "auto":
+        if "soundcloud.com" in query:
+            return await soundcloud_source.search(query)
+        else:
+            return await youtube_source.search(query)
+    elif provider.lower() == "youtube":
+        return await youtube_source.search(query)
+    elif provider.lower() == "soundcloud":
+        return await soundcloud_source.search(query)
+    else:
+        # Default to YouTube
+        return await youtube_source.search(query)
+
+
 async def play_next(
     guild: discord.Guild, voice_client: VoiceClient, channel: TextChannel
 ):
@@ -152,24 +167,6 @@ async def on_voice_state_update(member: Member, before: VoiceState, after: Voice
             # Clean up and disconnect
             queue_manager.drop_queue(str(member.guild.id))
             await voice_client.disconnect()
-
-
-async def get_track_from_query(query: str, provider: str = "auto") -> TrackRequestItem:
-    """Get a track from a query, automatically detecting or using specified provider"""
-
-    if provider == "auto":
-        # Auto-detect provider based on URL or default to YouTube
-        if "soundcloud.com" in query:
-            return await soundcloud_source.search(query)
-        else:
-            return await youtube_source.search(query)
-    elif provider.lower() == "youtube":
-        return await youtube_source.search(query)
-    elif provider.lower() == "soundcloud":
-        return await soundcloud_source.search(query)
-    else:
-        # Default to YouTube
-        return await youtube_source.search(query)
 
 
 @bot.tree.command(name="play", description="Play a song from YouTube or SoundCloud")
