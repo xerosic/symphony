@@ -23,8 +23,8 @@ class YouTubeSource:
         }
 
         self.ffmpeg_options = {
-            "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-            "options": "-vn",
+            "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin -protocol_whitelist file,http,https,tcp,tls,crypto",
+            "options": "-vn -bufsize 1024k",
         }
 
         self.ytdl = yt_dlp.YoutubeDL(self.ytdl_format_options)
@@ -52,12 +52,11 @@ class YouTubeSource:
                 url=data.get("webpage_url", ""),
                 length=data.get("duration", 0),
                 provider="YouTube",
-                thumbnail=data.get("thumbnail", None)
+                thumbnail=data.get("thumbnail", None),
             )
 
         except Exception as e:
             if isinstance(e, yt_dlp.utils.DownloadError):
-                # Check if it's a 404 error (video not found)
                 if (
                     "404" in str(e)
                     or "not found" in str(e).lower()

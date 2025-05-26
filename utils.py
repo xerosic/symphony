@@ -1,13 +1,19 @@
 from dataclasses import dataclass
+from datetime import timedelta
 from queue import SimpleQueue
 from urllib.parse import urlparse
 
 from discord import VoiceClient
 from loguru import logger
+from psutil import cpu_percent
 
-from datetime import timedelta
-
-ALLOWED_SITES = ["youtube.com", "youtu.be", "on.soundcloud.com", "soundcloud.com"]
+ALLOWED_SITES = [
+    "youtube.com",
+    "www.youtube.com",
+    "youtu.be",
+    "on.soundcloud.com",
+    "soundcloud.com",
+]
 
 
 @dataclass
@@ -36,8 +42,8 @@ class TrackQueueManager:
         )
 
     def get_next(self, guild_id: str) -> TrackRequestItem | None:
-        if self.queueDict.get(guild_id) is None:  # this shouldn't happen
-            logger.warning(f"no queue found for guild {guild_id}.")
+        if self.queueDict.get(guild_id) is None:
+            return None
 
         if self.queueDict.get(guild_id).empty():
             logger.debug(f"queue for guild {guild_id} is empty, dropping it...")
@@ -62,7 +68,7 @@ class TrackQueueManager:
             return True
 
         return False
-    
+
     def get_queue_length(self, guild_id: str) -> int:
         if self.queueDict.get(guild_id) is None:
             return 0
@@ -76,7 +82,7 @@ class VolumeManager:
         logger.debug("initialized volume manager.")
 
     def get_volume(self, guild_id: str) -> float:
-        return self.volumeDict.get(guild_id, 0)
+        return self.volumeDict.get(guild_id, 1)
 
     def set_volume(self, guild_id: str, volume: float) -> None:
         self.volumeDict[guild_id] = volume
@@ -95,13 +101,15 @@ def is_vc_empty(voice_client: VoiceClient) -> bool:
 def is_valid_url(testString: str) -> bool:
     result = urlparse(testString)
 
-    if result.scheme != "https":
+    if not testString.startswith("http"):
         return False
 
     if result.path == "":
+        logger.debug(f"Invalid URL: {testString} has no path.")
         return False
 
     if result.netloc not in ALLOWED_SITES:
+        logger.debug(f"Invalid URL: {testString} is not from an allowed site.")
         return False
 
     return True
@@ -128,3 +136,7 @@ def format_duration(seconds: int) -> str:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     else:
         return f"{minutes}:{secs:02d}"
+
+
+def get_cpu_usage() -> float:
+    return cpu_percent()

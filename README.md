@@ -1,6 +1,6 @@
 # 🎼 Symphony - No fuss self-hostable Discord musicbot 
 
-Symphony is a simple self-hostable Discord musicbot that can play music from YouTube and Soundcloud (coming soon).
+Symphony is a simple self-hostable Discord musicbot that can play music from YouTube and Soundcloud.
 
 ## Installation
 
@@ -51,11 +51,19 @@ _The bot supports slash commands_
 - `/play <query> <provider>`: Play a song from YouTube or Soundcloud (both URL and query are supported), where `<provider>` can be `youtube` or `soundcloud`.
   
 - `/skip`: Skip the current song
+- 
 - `/pause`: Pause the current song
+
 - `/resume`: Resume the current song
+
 - `/stop`: Stop the current song
+
 - `/leave`: Leave the voice channel
 
+- `/volume`: Set the volume of the bot (0-100)
+
+- `/stats`: Display bot statistics (uptime, servers, cpu usage, ...)
+  
 ## Docker Images
 
 Pre-built Docker images are automatically published to GitHub Container Registry on every commit:
