@@ -15,8 +15,14 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Create non-root user for security
+RUN useradd -m -u 1000 botuser && chown -R botuser:botuser /app
+
 # Copy the rest of the application
 COPY . .
+
+# Change to non-root user
+USER botuser
 
 # Run the bot
 CMD ["python", "main.py"]
