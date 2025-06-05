@@ -20,6 +20,10 @@ class YouTubeSource:
             "default_search": "auto",
             "source_address": "0.0.0.0",
             "geo_bypass": True,
+            "extract_flat": False,
+            "skip_download": True,
+            "max_downloads": 1,
+            "playlistend": 1,
         }
 
         self.ffmpeg_options = {

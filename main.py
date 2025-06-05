@@ -1,3 +1,4 @@
+import asyncio
 import os
 from time import time
 
@@ -91,7 +92,6 @@ async def play_next(
                     ),
                 )
 
-                # Create embed with track info
                 embed = discord.Embed(
                     title="🎵 Now Playing",
                     description=f"**{escape_markdown(next_track.title)}**",
@@ -192,13 +192,16 @@ async def play(interaction: discord.Interaction, query: str, provider: str):
 
     voice_channel = interaction.user.voice.channel
 
+    # Start both operations concurrently
+    track_task = asyncio.create_task(get_track_from_query(query, provider))
+
     try:
         voice_client = await voice_channel.connect()
     except discord.ClientException:
         voice_client = interaction.guild.voice_client
 
     try:
-        track = await get_track_from_query(query, provider)
+        track = await track_task
 
         if voice_client.is_playing() or voice_client.is_paused():
             queue_manager.append(str(interaction.guild.id), track)
@@ -230,6 +233,7 @@ async def play(interaction: discord.Interaction, query: str, provider: str):
 
             await interaction.followup.send(embed=embed)
         else:
+            # Start playing immediately with a placeholder, then swap to real audio
             source = await get_audio_source(track, str(interaction.guild.id))
             voice_client.play(
                 source,
@@ -375,6 +379,9 @@ async def stats(interaction: discord.Interaction):
     uptime_secs = uptime_seconds % 60
     uptime_str = f"{uptime_hours}h {uptime_minutes}m {uptime_secs}s"
 
+    # Get bot latency in milliseconds
+    ping = round(bot.latency * 1000, 2)
+
     embed = discord.Embed(
         title="📈 Bot Statistics",
         color=0x3498DB,
@@ -382,6 +389,7 @@ async def stats(interaction: discord.Interaction):
     embed.add_field(name="🏠 Total Guilds", value=str(total_guilds), inline=True)
     embed.add_field(name="👥 Total Users", value=str(total_users), inline=True)
     embed.add_field(name="💻 CPU Usage", value=f"{get_cpu_usage():.2f}%", inline=True)
+    embed.add_field(name="📶 Ping", value=f"{ping}ms", inline=True)
     embed.add_field(name="⏱️ Uptime", value=uptime_str, inline=True)
 
     embed.set_footer(
@@ -397,3 +405,10 @@ try:
     bot.run(token=os.getenv("DISCORD_TOKEN"), reconnect=True)
 except discord.LoginFailure as e:
     logger.critical(f"failed to login: {e}. Please check your token.")
+except discord.HTTPException as e:
+    logger.critical(
+        f"failed to connect to Discord: {e}. Please check your internet connection."
+    )
+except KeyboardInterrupt:
+    logger.info("stopping gracefully...")
+    bot.close()
