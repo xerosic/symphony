@@ -10,6 +10,7 @@ from discord import (
     TextChannel,
     VoiceClient,
     VoiceState,
+    app_commands,
 )
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -170,7 +171,13 @@ async def on_voice_state_update(member: Member, before: VoiceState, after: Voice
 
 
 @bot.tree.command(name="play", description="Play a song from YouTube or SoundCloud")
-async def play(interaction: discord.Interaction, query: str, provider: str):
+@app_commands.choices(
+    provider=[
+        app_commands.Choice(name="Youtube", value="youtube"),
+        app_commands.Choice(name="Soundcloud", value="soundcloud"),
+    ]
+)
+async def play(interaction: discord.Interaction, query: str, provider: str = "youtube"):
     if not interaction.user.voice:
         await interaction.response.send_message(
             "❌ You need to be in a voice channel!", ephemeral=True
@@ -178,12 +185,6 @@ async def play(interaction: discord.Interaction, query: str, provider: str):
         return
 
     if is_valid_url(query):  # handle links
-        if provider.lower() not in ["youtube", "soundcloud"]:
-            await interaction.response.send_message(
-                "❌ Invalid provider! Use 'youtube' or 'soundcloud'.", ephemeral=True
-            )
-            return
-
         await interaction.response.send_message(
             f"🔗 Playing from **{provider.capitalize()}**: *{query}*"
         )

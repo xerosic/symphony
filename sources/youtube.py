@@ -27,7 +27,7 @@ class YouTubeSource:
         }
 
         self.ffmpeg_options = {
-            "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin -protocol_whitelist file,http,https,tcp,tls,crypto",
+            "before_options": "-re -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin -protocol_whitelist file,http,https,tcp,tls,crypto",
             "options": "-vn -bufsize 1024k",
         }
 
