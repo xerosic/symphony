@@ -1,10 +1,16 @@
-FROM python:3.12.9-slim
+FROM python:3.12.9-alpine
 
-# Install system dependencies including FFmpeg
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
+# Install system dependencies including FFmpeg, git, and build tools
+RUN apk add --no-cache \
     ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
+    curl \
+    unzip \
+    git \
+    gcc \
+    deno \
+    musl-dev \
+    linux-headers \
+    && rm -rf /var/cache/apk/*
 
 # Set working directory
 WORKDIR /app
@@ -15,8 +21,11 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install yt-dlp from source
+RUN pip install git+https://github.com/yt-dlp/yt-dlp.git /tmp/yt-dlp.git
+
 # Create non-root user for security
-RUN useradd -m -u 1000 botuser && chown -R botuser:botuser /app
+RUN adduser -D -u 1000 botuser && chown -R botuser:botuser /app
 
 # Copy the rest of the application
 COPY . .
