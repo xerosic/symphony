@@ -22,7 +22,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Install yt-dlp from source
-RUN pip install git+https://github.com/yt-dlp/yt-dlp.git /tmp/yt-dlp.git
+RUN pip install git+https://github.com/yt-dlp/yt-dlp.git
 
 # Create non-root user for security
 RUN adduser -D -u 1000 botuser && chown -R botuser:botuser /app
