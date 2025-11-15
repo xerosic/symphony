@@ -3,3 +3,4 @@ python-dotenv
 pynacl
 loguru
 psutil
+yt-dlp[default]

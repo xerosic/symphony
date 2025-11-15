@@ -24,4 +24,4 @@ wheels/
 .coverage
 htmlcov/
 .venv
-
+.mypy_cache/
