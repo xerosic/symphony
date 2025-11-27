@@ -1,18 +1,20 @@
+from __future__ import annotations
+
 import asyncio
 import os
 from time import time
+from typing import Callable, Dict, Optional, Protocol, Sequence, Set, cast
 
 import discord
 from discord import (
-    Client,
     Member,
     PCMVolumeTransformer,
-    TextChannel,
     VoiceClient,
     VoiceState,
     app_commands,
 )
 from discord.ext import commands
+from discord.abc import Messageable
 from dotenv import load_dotenv
 from loguru import logger
 
@@ -21,19 +23,18 @@ from sources.youtube import YouTubeSource
 from utils import (
     TrackQueueManager,
     TrackRequestItem,
+    StreamInfo,
     VolumeManager,
     escape_markdown,
     format_duration,
     get_cpu_usage,
-    is_valid_url,
     is_vc_empty,
 )
 
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
-bot: Client = commands.Bot(command_prefix="!", intents=intents)
-
+bot: commands.Bot = commands.Bot(command_prefix="!", intents=intents)
 
 queue_manager = TrackQueueManager()
 volume_manager = VolumeManager()
@@ -41,111 +42,211 @@ youtube_source = YouTubeSource()
 soundcloud_source = SoundCloudSource()
 
 bot_start_time = time()
+prefetch_tasks: Set[asyncio.Task[StreamInfo]] = set()
+
+
+class AudioProvider(Protocol):
+    async def search(self, query: str) -> TrackRequestItem: ...
+
+    async def resolve_stream(self, track: TrackRequestItem) -> StreamInfo: ...
+
+    async def get_audio_source(
+        self,
+        track: TrackRequestItem,
+        volume: float,
+        stream_info: Optional[StreamInfo] = None,
+    ) -> PCMVolumeTransformer: ...
+
+
+PROVIDER_MAP: Dict[str, AudioProvider] = {
+    "youtube": youtube_source,
+    "soundcloud": soundcloud_source,
+}
+
+
+def normalize_provider_name(provider: str, query: Optional[str] = None) -> str:
+    base = provider.lower()
+    if base == "auto":
+        if query and "soundcloud.com" in query.lower():
+            return "soundcloud"
+        return "youtube"
+    if base not in PROVIDER_MAP:
+        return "youtube"
+    return base
+
+
+def get_provider(provider_name: str) -> AudioProvider:
+    return PROVIDER_MAP.get(provider_name.lower(), youtube_source)
+
+
+def schedule_stream_prefetch(track: TrackRequestItem) -> None:
+    provider = get_provider(track.provider)
+    task = asyncio.create_task(provider.resolve_stream(track))
+    prefetch_tasks.add(task)
+
+    def _cleanup(done_task: asyncio.Task[StreamInfo]) -> None:
+        prefetch_tasks.discard(done_task)
+        if done_task.cancelled():
+            return
+        exc = done_task.exception()
+        if exc:
+            logger.error(f"prefetch error for {track.title}: {exc}")
+
+    task.add_done_callback(_cleanup)
+
+
+def build_track_embed(
+    *,
+    track: TrackRequestItem,
+    title: str,
+    color: int,
+    requester_name: str,
+    requester_avatar: Optional[str],
+    extra_fields: Optional[Sequence[tuple[str, str]]] = None,
+) -> discord.Embed:
+    embed = discord.Embed(
+        title=title,
+        description=f"**{escape_markdown(track.title)}**",
+        color=color,
+    )
+    embed.add_field(name="⏱️ Duration", value=format_duration(track.length), inline=True)
+    embed.add_field(name="📡 Source", value=track.provider, inline=True)
+    embed.add_field(name="🔗 URL", value=f"[Open]({track.url})", inline=True)
+
+    if track.stream_bitrate:
+        embed.add_field(
+            name="🎚️ Bitrate", value=f"{track.stream_bitrate} kbps", inline=True
+        )
+
+    if extra_fields:
+        for name, value in extra_fields:
+            embed.add_field(name=name, value=value, inline=True)
+
+    if track.thumbnail:
+        embed.set_thumbnail(url=track.thumbnail)
+
+    embed.set_footer(text=f"Requested by {requester_name}", icon_url=requester_avatar)
+    return embed
+
+
+def after_playback_callback(
+    guild: discord.Guild,
+    voice_client: VoiceClient,
+    channel: Messageable,
+) -> Callable[[Optional[Exception]], None]:
+    def _callback(error: Optional[Exception]) -> None:
+        if error:
+            logger.error(f"playback error: {error}")
+        asyncio.run_coroutine_threadsafe(
+            play_next(guild, voice_client, channel),
+            bot.loop,
+        )
+
+    return _callback
+
+
+async def ensure_voice_connection(interaction: discord.Interaction) -> VoiceClient:
+    guild = interaction.guild
+    if guild is None or not isinstance(interaction.user, Member):
+        raise ValueError("This command can only be used inside a server.")
+
+    user_voice_state = interaction.user.voice
+    if not user_voice_state or not user_voice_state.channel:
+        raise ValueError("You need to be connected to a voice channel.")
+
+    voice_client = cast(Optional[VoiceClient], guild.voice_client)
+    if voice_client and voice_client.channel == user_voice_state.channel:
+        return voice_client
+
+    try:
+        if voice_client:
+            await voice_client.move_to(user_voice_state.channel)
+            return voice_client
+
+        new_client: VoiceClient = await user_voice_state.channel.connect()
+        if new_client.channel:
+            await guild.change_voice_state(channel=new_client.channel, self_deaf=True)
+        return new_client
+    except discord.ClientException as exc:
+        logger.error(f"failed to connect to voice: {exc}")
+        raise ValueError("Unable to join the voice channel.") from exc
 
 
 async def get_audio_source(
-    track: TrackRequestItem, guild_id: str = None
+    track: TrackRequestItem,
+    guild_id: Optional[str],
+    stream_info: Optional[StreamInfo] = None,
 ) -> PCMVolumeTransformer:
+    provider = get_provider(track.provider)
     volume = volume_manager.get_volume(guild_id)
-
-    if track.provider == "YouTube":
-        source = await youtube_source.get_audio_source(track)
-        source.volume = volume
-        return source
-    elif track.provider == "SoundCloud":
-        source = await soundcloud_source.get_audio_source(track)
-        source.volume = volume
-        return source
-    else:
-        # Default to YouTube
-        source = await youtube_source.get_audio_source(track)
-        source.volume = volume
-        return source
+    return await provider.get_audio_source(track, volume, stream_info)
 
 
 async def get_track_from_query(query: str, provider: str = "auto") -> TrackRequestItem:
-    if provider == "auto":
-        if "soundcloud.com" in query:
-            return await soundcloud_source.search(query)
-        else:
-            return await youtube_source.search(query)
-    elif provider.lower() == "youtube":
-        return await youtube_source.search(query)
-    elif provider.lower() == "soundcloud":
-        return await soundcloud_source.search(query)
-    else:
-        # Default to YouTube
-        return await youtube_source.search(query)
+    provider_key = normalize_provider_name(provider, query)
+    provider_instance = get_provider(provider_key)
+    return await provider_instance.search(query)
 
 
 async def play_next(
-    guild: discord.Guild, voice_client: VoiceClient, channel: TextChannel
-):
-    if not voice_client.is_playing() and not voice_client.is_paused():
-        next_track = queue_manager.get_next(str(guild.id))
-        if next_track:
-            try:
-                source = await get_audio_source(next_track, str(guild.id))
-                voice_client.play(
-                    source,
-                    after=lambda e: bot.loop.create_task(
-                        play_next(guild, voice_client, channel)
-                    ),
-                )
+    guild: discord.Guild,
+    voice_client: VoiceClient,
+    channel: Messageable,
+) -> None:
+    if voice_client.is_playing() or voice_client.is_paused():
+        return
 
-                embed = discord.Embed(
-                    title="🎵 Now Playing",
-                    description=f"**{escape_markdown(next_track.title)}**",
-                    color=0x1DB954,
-                )
-                embed.add_field(
-                    name="⏱️ Duration",
-                    value=format_duration(next_track.length),
-                    inline=True,
-                )
-                embed.add_field(
-                    name="📡 Source", value=next_track.provider, inline=True
-                )
-                embed.add_field(
-                    name="🔗 URL", value=f"[Click here]({next_track.url})", inline=True
-                )
+    next_track = queue_manager.get_next(str(guild.id))
+    if not next_track:
+        if is_vc_empty(voice_client):
+            queue_manager.drop_queue(str(guild.id))
+            await voice_client.disconnect(force=False)
+        return
 
-                if hasattr(next_track, "thumbnail") and next_track.thumbnail:
-                    embed.set_thumbnail(url=next_track.thumbnail)
+    try:
+        provider = get_provider(next_track.provider)
+        stream_info = await provider.resolve_stream(next_track)
+        source = await get_audio_source(next_track, str(guild.id), stream_info)
+        voice_client.play(
+            source,
+            after=after_playback_callback(guild, voice_client, channel),
+        )
 
-                embed.set_footer(
-                    text=f"Requested by {channel.guild.me.name}",
-                    icon_url=channel.guild.me.avatar.url
-                    if channel.guild.me.avatar
-                    else None,
-                )
-
-                await channel.send(embed=embed)
-            except Exception as e:
-                logger.error(f"error playing next track: {e}.")
-                await channel.send(f"❌ An error occurred: {str(e)}")
+        bot_user = bot.user
+        bot_member = guild.me
+        if bot_member is None and bot_user:
+            bot_member = guild.get_member(bot_user.id)
+        requester_name = bot_member.display_name if bot_member else guild.name
+        requester_avatar = (
+            bot_member.avatar.url if bot_member and bot_member.avatar else None
+        )
+        embed = build_track_embed(
+            track=next_track,
+            title="🎵 Now Playing",
+            color=0x1DB954,
+            requester_name=requester_name,
+            requester_avatar=requester_avatar,
+        )
+        await channel.send(embed=embed)
+    except Exception as exc:
+        logger.error(f"error playing next track: {exc}")
+        await channel.send(f"❌ Failed to play next track: {exc}")
+        await play_next(guild, voice_client, channel)
 
 
 @bot.event
-async def on_ready():
+async def on_ready() -> None:
     logger.info(f"logged in as {bot.user}.")
-
     activity = discord.Activity(
         type=discord.ActivityType.listening, name="your music requests 🎵"
     )
     await bot.change_presence(status=discord.Status.online, activity=activity)
 
-    for guild in bot.guilds:
-        if guild.voice_client and not guild.voice_client.self_deaf:
-            await guild.change_voice_state(
-                channel=guild.voice_client.channel, self_deaf=True
-            )
-
     try:
         synced = await bot.tree.sync()
         logger.success(f"synced {len(synced)} command(s).")
-    except Exception as e:
-        logger.error(f"failed to sync commands: {e}.")
+    except Exception as exc:
+        logger.error(f"failed to sync commands: {exc}")
 
 
 @bot.event
@@ -154,139 +255,96 @@ async def on_voice_state_update(member: Member, before: VoiceState, after: Voice
         return
 
     voice_client = member.guild.voice_client
-    if not voice_client:
+    if not isinstance(voice_client, VoiceClient):
         return
 
-    if (
-        before.channel == voice_client.channel and after.channel != voice_client.channel
-    ):  # check if some1 left
+    if before.channel == voice_client.channel and after.channel != voice_client.channel:
         if is_vc_empty(voice_client):
             logger.debug(
                 f"all users left voice channel in guild {member.guild.id}, disconnecting bot"
             )
-
-            # Clean up and disconnect
             queue_manager.drop_queue(str(member.guild.id))
-            await voice_client.disconnect()
+            await voice_client.disconnect(force=False)
 
 
 @bot.tree.command(name="play", description="Play a song from YouTube or SoundCloud")
 @app_commands.choices(
     provider=[
-        app_commands.Choice(name="Youtube", value="youtube"),
-        app_commands.Choice(name="Soundcloud", value="soundcloud"),
+        app_commands.Choice(name="YouTube", value="youtube"),
+        app_commands.Choice(name="SoundCloud", value="soundcloud"),
+        app_commands.Choice(name="Auto", value="auto"),
     ]
 )
-async def play(interaction: discord.Interaction, query: str, provider: str = "youtube"):
+async def play(interaction: discord.Interaction, query: str, provider: str = "auto"):
+    if not interaction.guild or not isinstance(interaction.user, Member):
+        await interaction.response.send_message(
+            "❌ This command can only be used in a server.", ephemeral=True
+        )
+        return
+
     if not interaction.user.voice:
         await interaction.response.send_message(
             "❌ You need to be in a voice channel!", ephemeral=True
         )
         return
 
-    if is_valid_url(query):  # handle links
-        await interaction.response.send_message(
-            f"🔗 Playing from **{provider.capitalize()}**: *{query}*"
+    await interaction.response.defer(thinking=True)
+
+    guild_id = str(interaction.guild.id)
+    voice_client = await ensure_voice_connection(interaction)
+    track = await get_track_from_query(query, provider)
+    schedule_stream_prefetch(track)
+
+    channel = interaction.channel
+    if channel is None or not isinstance(channel, Messageable):
+        await interaction.followup.send("❌ Unable to determine the text channel.")
+        return
+
+    requester_name = interaction.user.display_name
+    requester_avatar = interaction.user.avatar.url if interaction.user.avatar else None
+
+    if voice_client.is_playing() or voice_client.is_paused():
+        queue_manager.append(guild_id, track)
+        position = queue_manager.get_queue_length(guild_id)
+        embed = build_track_embed(
+            track=track,
+            title="🎵 Added to Queue",
+            color=0x3498DB,
+            requester_name=requester_name,
+            requester_avatar=requester_avatar,
+            extra_fields=[("⏬ Position", str(position))],
         )
-    else:  # handle search queries
-        await interaction.response.send_message(f"🔍 **Searching for:** *{query}*")
+        await interaction.followup.send(embed=embed)
+        return
 
-    voice_channel = interaction.user.voice.channel
+    provider_instance = get_provider(track.provider)
+    stream_info = await provider_instance.resolve_stream(track)
+    source = await get_audio_source(track, guild_id, stream_info)
+    voice_client.play(
+        source,
+        after=after_playback_callback(interaction.guild, voice_client, channel),
+    )
 
-    # Start both operations concurrently
-    track_task = asyncio.create_task(get_track_from_query(query, provider))
-
-    try:
-        voice_client = await voice_channel.connect()
-    except discord.ClientException:
-        voice_client = interaction.guild.voice_client
-
-    try:
-        track = await track_task
-
-        if voice_client.is_playing() or voice_client.is_paused():
-            queue_manager.append(str(interaction.guild.id), track)
-
-            embed = discord.Embed(
-                title="🎵 Added to Queue",
-                description=f"**{track.title}**",
-                color=0x3498DB,
-            )
-            embed.add_field(
-                name="⏱️ Duration", value=format_duration(track.length), inline=True
-            )
-            embed.add_field(name="📡 Source", value=track.provider, inline=True)
-            embed.add_field(
-                name="⏬ Position",
-                value=f"{queue_manager.get_queue_length(str(interaction.guild.id))}",
-                inline=True,
-            )
-
-            if hasattr(track, "thumbnail") and track.thumbnail:
-                embed.set_thumbnail(url=track.thumbnail)
-
-            embed.set_footer(
-                text=f"Requested by {interaction.user.name}",
-                icon_url=interaction.user.avatar.url
-                if interaction.user.avatar
-                else None,
-            )
-
-            await interaction.followup.send(embed=embed)
-        else:
-            # Start playing immediately with a placeholder, then swap to real audio
-            source = await get_audio_source(track, str(interaction.guild.id))
-            voice_client.play(
-                source,
-                after=lambda e: bot.loop.create_task(
-                    play_next(interaction.guild, voice_client, interaction.channel)
-                ),
-            )
-
-            embed = discord.Embed(
-                title="🎵 Now Playing",
-                description=f"**{escape_markdown(track.title)}**",
-                color=0x1DB954,
-            )
-            embed.add_field(
-                name="Duration", value=format_duration(track.length), inline=True
-            )
-            embed.add_field(name="Source", value=track.provider, inline=True)
-            embed.add_field(name="URL", value=f"[Click here]({track.url})", inline=True)
-
-            if hasattr(track, "thumbnail") and track.thumbnail:
-                embed.set_thumbnail(url=track.thumbnail)
-
-            embed.set_footer(
-                text=f"Requested by {interaction.user.name}",
-                icon_url=interaction.user.avatar.url
-                if interaction.user.avatar
-                else None,
-            )
-
-            await interaction.followup.send(embed=embed)
-
-    except Exception as e:
-        logger.error(f"error in play command: {e}")
-        await interaction.followup.send(f"❌ An error occurred: {str(e)}")
+    embed = build_track_embed(
+        track=track,
+        title="🎵 Now Playing",
+        color=0x1DB954,
+        requester_name=requester_name,
+        requester_avatar=requester_avatar,
+    )
+    await interaction.followup.send(embed=embed)
 
 
 @bot.tree.command(name="skip", description="Skip the current song")
 async def skip(interaction: discord.Interaction):
-    voice_client = interaction.guild.voice_client
-    if not interaction.user.voice:
+    if not interaction.guild:
         await interaction.response.send_message(
-            "❌ You need to be in a voice channel!", ephemeral=True
+            "❌ This command can only be used in a server.", ephemeral=True
         )
         return
 
-    if not voice_client:
-        await interaction.response.send_message(
-            "🔇 I'm not playing anything!", ephemeral=True
-        )
-        return
-
-    if not voice_client.is_playing():
+    voice_client = cast(Optional[VoiceClient], interaction.guild.voice_client)
+    if not voice_client or not voice_client.is_playing():
         await interaction.response.send_message(
             "🔇 Nothing is playing!", ephemeral=True
         )
@@ -298,118 +356,171 @@ async def skip(interaction: discord.Interaction):
 
 @bot.tree.command(name="volume", description="Set the volume (0-100)")
 async def volume(interaction: discord.Interaction, volume: int):
-    if not interaction.user.voice:
+    if not interaction.guild:
         await interaction.response.send_message(
-            "❌ You need to be in a voice channel!", ephemeral=True
+            "❌ This command can only be used in a server.", ephemeral=True
         )
         return
 
-    voice_client: VoiceClient = interaction.guild.voice_client
+    voice_client = cast(Optional[VoiceClient], interaction.guild.voice_client)
     if not voice_client:
         await interaction.response.send_message(
             "🔇 I'm not connected to a voice channel!", ephemeral=True
         )
         return
 
-    if volume < 0 or volume > 100:
+    if not 0 <= volume <= 100:
         await interaction.response.send_message(
             "❌ Volume must be between 0 and 100.", ephemeral=True
         )
         return
 
-    volume_manager.set_volume(str(interaction.guild.id), volume / 100.0)
+    guild_id = str(interaction.guild.id)
+    volume_value = volume / 100.0
+    volume_manager.set_volume(guild_id, volume_value)
 
-    if voice_client.source and hasattr(voice_client.source, "volume"):
-        voice_client.source.volume = volume / 100.0
+    source = getattr(voice_client, "source", None)
+    if source and hasattr(source, "volume"):
+        source.volume = volume_value
 
     await interaction.response.send_message(f"🔊 Volume set to {volume}%")
 
 
 @bot.tree.command(name="stop", description="Stop playing music and clear queue")
 async def stop(interaction: discord.Interaction):
-    voice_client = interaction.guild.voice_client
-    if voice_client and voice_client.is_playing():
-        voice_client.stop()
-        queue_manager.drop_queue(str(interaction.guild.id))
-        await interaction.response.send_message("⏹️ Stopped playing and cleared queue")
-    else:
-        await interaction.response.send_message("🔇 Nothing is playing!")
+    if not interaction.guild:
+        await interaction.response.send_message(
+            "❌ This command can only be used in a server.", ephemeral=True
+        )
+        return
+
+    voice_client = cast(Optional[VoiceClient], interaction.guild.voice_client)
+    if not voice_client:
+        await interaction.response.send_message(
+            "🔇 Nothing is playing!", ephemeral=True
+        )
+        return
+
+    voice_client.stop()
+    queue_manager.drop_queue(str(interaction.guild.id))
+    await interaction.response.send_message("⏹️ Stopped playing and cleared queue")
 
 
 @bot.tree.command(name="pause", description="Pause the current song")
 async def pause(interaction: discord.Interaction):
-    voice_client = interaction.guild.voice_client
+    if not interaction.guild:
+        await interaction.response.send_message(
+            "❌ This command can only be used in a server.", ephemeral=True
+        )
+        return
+
+    voice_client = cast(Optional[VoiceClient], interaction.guild.voice_client)
     if voice_client and voice_client.is_playing():
         voice_client.pause()
         await interaction.response.send_message("⏸️ Paused")
     else:
-        await interaction.response.send_message("🔇 Nothing is playing!")
+        await interaction.response.send_message(
+            "🔇 Nothing is playing!", ephemeral=True
+        )
 
 
 @bot.tree.command(name="resume", description="Resume playing")
 async def resume(interaction: discord.Interaction):
-    voice_client = interaction.guild.voice_client
+    if not interaction.guild:
+        await interaction.response.send_message(
+            "❌ This command can only be used in a server.", ephemeral=True
+        )
+        return
+
+    voice_client = cast(Optional[VoiceClient], interaction.guild.voice_client)
     if voice_client and voice_client.is_paused():
         voice_client.resume()
         await interaction.response.send_message("▶️ Resumed")
     else:
-        await interaction.response.send_message("🔇 Nothing is paused!")
+        await interaction.response.send_message("🔇 Nothing is paused!", ephemeral=True)
 
 
 @bot.tree.command(name="leave", description="Disconnect the bot from voice")
 async def leave(interaction: discord.Interaction):
-    voice_client = interaction.guild.voice_client
+    if not interaction.guild:
+        await interaction.response.send_message(
+            "❌ This command can only be used in a server.", ephemeral=True
+        )
+        return
+
+    voice_client = cast(Optional[VoiceClient], interaction.guild.voice_client)
     if voice_client:
         queue_manager.drop_queue(str(interaction.guild.id))
-        await voice_client.disconnect()
+        await voice_client.disconnect(force=False)
         await interaction.response.send_message(
             "👋 Left the voice channel and cleared queue"
         )
     else:
-        await interaction.response.send_message("🔇 I'm not in a voice channel!")
+        await interaction.response.send_message(
+            "🔇 I'm not in a voice channel!", ephemeral=True
+        )
 
 
 @bot.tree.command(name="stats", description="Get bot statistics")
 async def stats(interaction: discord.Interaction):
-    total_guilds = len(bot.guilds)
-    total_users = sum(len(guild.members) for guild in bot.guilds)
-
     uptime_seconds = int(time() - bot_start_time)
     uptime_hours = uptime_seconds // 3600
     uptime_minutes = (uptime_seconds % 3600) // 60
     uptime_secs = uptime_seconds % 60
     uptime_str = f"{uptime_hours}h {uptime_minutes}m {uptime_secs}s"
-
-    # Get bot latency in milliseconds
     ping = round(bot.latency * 1000, 2)
 
-    embed = discord.Embed(
-        title="📈 Bot Statistics",
-        color=0x3498DB,
+    embed = discord.Embed(title="📈 Bot Statistics", color=0x3498DB)
+    embed.add_field(name="🏠 Total Guilds", value=str(len(bot.guilds)), inline=True)
+    embed.add_field(
+        name="👥 Total Users",
+        value=str(sum(len(guild.members) for guild in bot.guilds)),
+        inline=True,
     )
-    embed.add_field(name="🏠 Total Guilds", value=str(total_guilds), inline=True)
-    embed.add_field(name="👥 Total Users", value=str(total_users), inline=True)
     embed.add_field(name="💻 CPU Usage", value=f"{get_cpu_usage():.2f}%", inline=True)
     embed.add_field(name="📶 Ping", value=f"{ping}ms", inline=True)
     embed.add_field(name="⏱️ Uptime", value=uptime_str, inline=True)
+    embed.add_field(
+        name="🎛️ Prefetch Tasks",
+        value=str(len(prefetch_tasks)),
+        inline=True,
+    )
 
+    icon_url = bot.user.avatar.url if bot.user and bot.user.avatar else None
     embed.set_footer(
         text="🎵 Powered by https://github.com/xerosic/symphony 🎵",
-        icon_url=bot.user.avatar.url if bot.user.avatar else None,
+        icon_url=icon_url,
     )
 
     await interaction.response.send_message(embed=embed)
 
 
+@play.error
+async def play_error_handler(
+    interaction: discord.Interaction, error: app_commands.AppCommandError
+):
+    logger.error(f"/play failed: {error}")
+    message = "❌ An unexpected error occurred."
+    if isinstance(error, app_commands.CommandInvokeError) and error.original:
+        message = f"❌ {error.original}"
+    if interaction.response.is_done():
+        await interaction.followup.send(message)
+    else:
+        await interaction.response.send_message(message, ephemeral=True)
+
+
 load_dotenv()
+token = os.getenv("DISCORD_TOKEN")
+if not token:
+    raise RuntimeError("DISCORD_TOKEN environment variable is not set.")
+
 try:
-    bot.run(token=os.getenv("DISCORD_TOKEN"), reconnect=True)
-except discord.LoginFailure as e:
-    logger.critical(f"failed to login: {e}. Please check your token.")
-except discord.HTTPException as e:
+    bot.run(token=token, reconnect=True)
+except discord.LoginFailure as exc:
+    logger.critical(f"failed to login: {exc}. Please check your token.")
+except discord.HTTPException as exc:
     logger.critical(
-        f"failed to connect to Discord: {e}. Please check your internet connection."
+        f"failed to connect to Discord: {exc}. Please check your internet connection."
     )
 except KeyboardInterrupt:
     logger.info("stopping gracefully...")
-    bot.close()

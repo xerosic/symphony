@@ -1,16 +1,21 @@
-import asyncio
+from __future__ import annotations
 
-import yt_dlp
+import asyncio
+from collections import OrderedDict
+from time import time
+from typing import Dict, Optional, Tuple
+
+import yt_dlp  # type: ignore[import-untyped]
 from discord import FFmpegPCMAudio, PCMVolumeTransformer
 from loguru import logger
 
-from utils import TrackRequestItem
+from utils import StreamInfo, TrackRequestItem
 
 
 class YouTubeSource:
-    def __init__(self):
+    def __init__(self) -> None:
         self.ytdl_format_options = {
-            "format": "bestaudio",
+            "format": "bestaudio/best",
             "noplaylist": True,
             "nocheckcertificate": True,
             "ignoreerrors": False,
@@ -27,17 +32,20 @@ class YouTubeSource:
         }
 
         self.ffmpeg_options = {
-            "before_options": "-re -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin -protocol_whitelist file,http,https,tcp,tls,crypto",
-            "options": "-vn -bufsize 1024k",
+            "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -reconnect_on_http_error 4xx,5xx -nostdin -loglevel warning -probesize 64k -analyzeduration 0",
+            "options": "-vn -sn -dn -bufsize 512k -ar 48000 -ac 2",
         }
 
         self.ytdl = yt_dlp.YoutubeDL(self.ytdl_format_options)
+        self._stream_cache: "OrderedDict[str, Tuple[StreamInfo, float]]" = OrderedDict()
+        self._cache_ttl = 900  # seconds
+        self._cache_max_entries = 128
+        self._inflight: Dict[str, asyncio.Task[StreamInfo]] = {}
 
     async def search(self, query: str) -> TrackRequestItem:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         try:
-            # If it's not a YouTube URL, search YouTube
             if not query.startswith("http"):
                 query = f"ytsearch:{query}"
 
@@ -46,69 +54,136 @@ class YouTubeSource:
             )
 
             if "entries" in data:
-                if not data["entries"]:  # No search results found
+                entries = data.get("entries") or []
+                if not entries:
                     raise ValueError("No tracks found on YouTube for this query")
-                data = data["entries"][0]
+                data = entries[0]
 
-            return TrackRequestItem(
+            track = TrackRequestItem(
                 id=data.get("id", ""),
                 title=data.get("title", "Unknown"),
                 url=data.get("webpage_url", ""),
                 length=data.get("duration", 0),
                 provider="YouTube",
-                thumbnail=data.get("thumbnail", None),
+                thumbnail=data.get("thumbnail"),
+                stream_bitrate=data.get("abr"),
             )
+            return track
 
-        except Exception as e:
-            if isinstance(e, yt_dlp.utils.DownloadError):
-                if (
-                    "404" in str(e)
-                    or "not found" in str(e).lower()
-                    or "unavailable" in str(e).lower()
+        except Exception as exc:
+            if isinstance(exc, yt_dlp.utils.DownloadError):
+                error_text = str(exc)
+                if any(
+                    token in error_text.lower()
+                    for token in ("404", "not found", "unavailable")
                 ):
                     logger.error(f"youTube video not found: {query}")
                     raise ValueError(
                         "❌ YouTube video not found. The link may be invalid or the video may have been removed."
-                    )
-                else:
-                    logger.error(f"download error while searching YouTube: {e}")
-                    raise ValueError(f"❌ Error accessing YouTube: {str(e)}")
-            else:
-                logger.error(f"error searching YouTube: {e}")
-                raise e
+                    ) from exc
+                logger.error(f"download error while searching YouTube: {exc}")
+                raise ValueError(f"❌ Error accessing YouTube: {error_text}") from exc
+            logger.error(f"error searching YouTube: {exc}")
+            raise
 
-    async def get_audio_source(self, track: TrackRequestItem) -> PCMVolumeTransformer:
-        """Get the audio source for a track"""
-        loop = asyncio.get_event_loop()
+    async def resolve_stream(self, track: TrackRequestItem) -> StreamInfo:
+        cache_key = track.url
+        cached = self._get_cached_stream(cache_key)
+        if cached:
+            return cached
+
+        inflight = self._inflight.get(cache_key)
+        if inflight:
+            return await inflight
+
+        task = asyncio.create_task(self._download_stream(cache_key))
+        self._inflight[cache_key] = task
+
+        try:
+            stream = await task
+        finally:
+            self._inflight.pop(cache_key, None)
+
+        self._remember_stream(cache_key, stream)
+        return stream
+
+    async def get_audio_source(
+        self,
+        track: TrackRequestItem,
+        volume: float,
+        stream_info: Optional[StreamInfo] = None,
+    ) -> PCMVolumeTransformer:
+        stream = stream_info or await self.resolve_stream(track)
+
+        audio_source = FFmpegPCMAudio(
+            stream.stream_url,
+            **self.ffmpeg_options,  # type: ignore[arg-type]
+        )
+        return PCMVolumeTransformer(audio_source, volume=volume)
+
+    async def _download_stream(self, url: str) -> StreamInfo:
+        loop = asyncio.get_running_loop()
 
         try:
             data = await loop.run_in_executor(
-                None, lambda: self.ytdl.extract_info(track.url, download=False)
+                None, lambda: self.ytdl.extract_info(url, download=False)
             )
-
-            audio_url = data["url"]
-
-            audio_source = FFmpegPCMAudio(
-                audio_url,
-                **self.ffmpeg_options,
-            )
-
-            return PCMVolumeTransformer(audio_source, volume=0.5)
-
-        except Exception as e:
-            if isinstance(e, yt_dlp.utils.DownloadError):
-                if (
-                    "404" in str(e)
-                    or "not found" in str(e).lower()
-                    or "unavailable" in str(e).lower()
+            stream_url = self._extract_stream_url(data)
+            bitrate = data.get("abr") or self._get_best_bitrate(data)
+            return StreamInfo(stream_url=stream_url, bitrate=bitrate)
+        except Exception as exc:
+            if isinstance(exc, yt_dlp.utils.DownloadError):
+                error_text = str(exc)
+                if any(
+                    token in error_text.lower()
+                    for token in ("404", "not found", "unavailable")
                 ):
-                    logger.error(f"youTube audio source not found for: {track.title}")
-                    raise ValueError("❌ YouTube video is no longer available")
-                else:
-                    logger.error(
-                        f"download error getting audio source for {track.title}: {e}"
-                    )
-                    raise ValueError(f"❌ Error getting audio from YouTube: {str(e)}")
-            else:
-                logger.error(f"error getting audio source for {track.title}: {e}")
-                raise e
+                    logger.error(f"youTube audio source not found for url: {url}")
+                    raise ValueError("❌ YouTube video is no longer available") from exc
+                logger.error(f"download error getting audio stream for {url}: {exc}")
+                raise ValueError(
+                    f"❌ Error getting audio from YouTube: {error_text}"
+                ) from exc
+            logger.error(f"unexpected error getting audio stream for {url}: {exc}")
+            raise
+
+    def _extract_stream_url(self, data: dict) -> str:
+        if data.get("url"):
+            return data["url"]
+
+        formats = data.get("formats") or []
+        audio_formats = [
+            fmt
+            for fmt in formats
+            if fmt.get("acodec") and fmt.get("acodec") != "none" and fmt.get("url")
+        ]
+
+        if not audio_formats:
+            raise ValueError("No valid audio stream found for YouTube track")
+
+        audio_formats.sort(key=lambda fmt: fmt.get("abr", 0), reverse=True)
+        return audio_formats[0]["url"]
+
+    def _get_best_bitrate(self, data: dict) -> Optional[int]:
+        formats = data.get("formats") or []
+        candidates = [fmt.get("abr") for fmt in formats if fmt.get("abr")]
+        if not candidates:
+            return None
+        return int(max(candidates))
+
+    def _get_cached_stream(self, cache_key: str) -> Optional[StreamInfo]:
+        cached = self._stream_cache.get(cache_key)
+        if not cached:
+            return None
+
+        stream, expires_at = cached
+        if expires_at < time():
+            self._stream_cache.pop(cache_key, None)
+            return None
+        return stream
+
+    def _remember_stream(self, cache_key: str, stream: StreamInfo) -> None:
+        self._stream_cache[cache_key] = (stream, time() + self._cache_ttl)
+        self._stream_cache.move_to_end(cache_key)
+        if len(self._stream_cache) > self._cache_max_entries:
+            self._stream_cache.popitem(last=False)
