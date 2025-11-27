@@ -43,6 +43,7 @@ soundcloud_source = SoundCloudSource()
 
 bot_start_time = time()
 prefetch_tasks: Set[asyncio.Task[StreamInfo]] = set()
+SYSTEM_FOOTER_TEXT = "🎵 Symphony • https://github.com/xerosic/symphony"
 
 
 class AudioProvider(Protocol):
@@ -100,8 +101,8 @@ def build_track_embed(
     track: TrackRequestItem,
     title: str,
     color: int,
-    requester_name: str,
-    requester_avatar: Optional[str],
+    requester_name: Optional[str] = None,
+    requester_avatar: Optional[str] = None,
     extra_fields: Optional[Sequence[tuple[str, str]]] = None,
 ) -> discord.Embed:
     embed = discord.Embed(
@@ -113,11 +114,6 @@ def build_track_embed(
     embed.add_field(name="📡 Source", value=track.provider, inline=True)
     embed.add_field(name="🔗 URL", value=f"[Open]({track.url})", inline=True)
 
-    if track.stream_bitrate:
-        embed.add_field(
-            name="🎚️ Bitrate", value=f"{track.stream_bitrate} kbps", inline=True
-        )
-
     if extra_fields:
         for name, value in extra_fields:
             embed.add_field(name=name, value=value, inline=True)
@@ -125,8 +121,44 @@ def build_track_embed(
     if track.thumbnail:
         embed.set_thumbnail(url=track.thumbnail)
 
-    embed.set_footer(text=f"Requested by {requester_name}", icon_url=requester_avatar)
+    resolved_name = requester_name or track.requested_by_name or "Unknown"
+    resolved_avatar = requester_avatar or track.requested_by_avatar
+    footer_text = f"Requested by:  {resolved_name}"
+    embed.set_footer(text=footer_text, icon_url=resolved_avatar)
     return embed
+
+
+def build_error_embed(title: str, description: str) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"❌ {title}",
+        description=description,
+        color=0xE74C3C,
+    )
+    embed.set_footer(text=SYSTEM_FOOTER_TEXT)
+    return embed
+
+
+async def send_interaction_error(
+    interaction: discord.Interaction,
+    *,
+    title: str,
+    description: str,
+    ephemeral: bool = True,
+) -> None:
+    embed = build_error_embed(title, description)
+    if interaction.response.is_done():
+        await interaction.followup.send(embed=embed, ephemeral=ephemeral)
+    else:
+        await interaction.response.send_message(embed=embed, ephemeral=ephemeral)
+
+
+async def send_channel_error(
+    channel: Messageable,
+    *,
+    title: str,
+    description: str,
+) -> None:
+    await channel.send(embed=build_error_embed(title, description))
 
 
 def after_playback_callback(
@@ -216,13 +248,15 @@ async def play_next(
         bot_member = guild.me
         if bot_member is None and bot_user:
             bot_member = guild.get_member(bot_user.id)
-        requester_name = bot_member.display_name if bot_member else guild.name
-        requester_avatar = (
+        fallback_name = bot_member.display_name if bot_member else guild.name
+        fallback_avatar = (
             bot_member.avatar.url if bot_member and bot_member.avatar else None
         )
+        requester_name = next_track.requested_by_name or fallback_name
+        requester_avatar = next_track.requested_by_avatar or fallback_avatar
         embed = build_track_embed(
             track=next_track,
-            title="🎵 Now Playing",
+            title="🎵  Now Playing",
             color=0x1DB954,
             requester_name=requester_name,
             requester_avatar=requester_avatar,
@@ -230,7 +264,11 @@ async def play_next(
         await channel.send(embed=embed)
     except Exception as exc:
         logger.error(f"error playing next track: {exc}")
-        await channel.send(f"❌ Failed to play next track: {exc}")
+        await send_channel_error(
+            channel,
+            title="❌ Playback Error",
+            description=str(exc),
+        )
         await play_next(guild, voice_client, channel)
 
 
@@ -290,49 +328,61 @@ async def play(interaction: discord.Interaction, query: str, provider: str = "au
 
     await interaction.response.defer(thinking=True)
 
-    guild_id = str(interaction.guild.id)
-    voice_client = await ensure_voice_connection(interaction)
-    track = await get_track_from_query(query, provider)
-    schedule_stream_prefetch(track)
+    try:
+        guild_id = str(interaction.guild.id)
+        voice_client = await ensure_voice_connection(interaction)
+        track = await get_track_from_query(query, provider)
+        schedule_stream_prefetch(track)
 
-    channel = interaction.channel
-    if channel is None or not isinstance(channel, Messageable):
-        await interaction.followup.send("❌ Unable to determine the text channel.")
-        return
+        channel = interaction.channel
+        if channel is None or not isinstance(channel, Messageable):
+            raise RuntimeError("Unable to determine the text channel for this interaction.")
 
-    requester_name = interaction.user.display_name
-    requester_avatar = interaction.user.avatar.url if interaction.user.avatar else None
+        requester_name = interaction.user.display_name
+        requester_avatar = (
+            interaction.user.avatar.url if interaction.user.avatar else None
+        )
 
-    if voice_client.is_playing() or voice_client.is_paused():
-        queue_manager.append(guild_id, track)
-        position = queue_manager.get_queue_length(guild_id)
+        track.requested_by_name = requester_name
+        track.requested_by_avatar = requester_avatar
+
+        if voice_client.is_playing() or voice_client.is_paused():
+            queue_manager.append(guild_id, track)
+            position = queue_manager.get_queue_length(guild_id)
+            embed = build_track_embed(
+                track=track,
+                title="🎵 Added to Queue",
+                color=0x3498DB,
+                requester_name=requester_name,
+                requester_avatar=requester_avatar,
+                extra_fields=[("⏬ Position", str(position))],
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
+        provider_instance = get_provider(track.provider)
+        stream_info = await provider_instance.resolve_stream(track)
+        source = await get_audio_source(track, guild_id, stream_info)
+        voice_client.play(
+            source,
+            after=after_playback_callback(interaction.guild, voice_client, channel),
+        )
+
         embed = build_track_embed(
             track=track,
-            title="🎵 Added to Queue",
-            color=0x3498DB,
+            title="🎵  Now Playing",
+            color=0x1DB954,
             requester_name=requester_name,
             requester_avatar=requester_avatar,
-            extra_fields=[("⏬ Position", str(position))],
         )
         await interaction.followup.send(embed=embed)
-        return
-
-    provider_instance = get_provider(track.provider)
-    stream_info = await provider_instance.resolve_stream(track)
-    source = await get_audio_source(track, guild_id, stream_info)
-    voice_client.play(
-        source,
-        after=after_playback_callback(interaction.guild, voice_client, channel),
-    )
-
-    embed = build_track_embed(
-        track=track,
-        title="🎵 Now Playing",
-        color=0x1DB954,
-        requester_name=requester_name,
-        requester_avatar=requester_avatar,
-    )
-    await interaction.followup.send(embed=embed)
+    except Exception as exc:
+        logger.error(f"error handling /play: {exc}")
+        await send_interaction_error(
+            interaction,
+            title="Unable to play track",
+            description=str(exc),
+        )
 
 
 @bot.tree.command(name="skip", description="Skip the current song")
@@ -488,7 +538,7 @@ async def stats(interaction: discord.Interaction):
 
     icon_url = bot.user.avatar.url if bot.user and bot.user.avatar else None
     embed.set_footer(
-        text="🎵 Powered by https://github.com/xerosic/symphony 🎵",
+        text="Powered by https://github.com/xerosic/symphony 🎵",
         icon_url=icon_url,
     )
 
@@ -500,13 +550,14 @@ async def play_error_handler(
     interaction: discord.Interaction, error: app_commands.AppCommandError
 ):
     logger.error(f"/play failed: {error}")
-    message = "❌ An unexpected error occurred."
+    description = "An unexpected error occurred."
     if isinstance(error, app_commands.CommandInvokeError) and error.original:
-        message = f"❌ {error.original}"
-    if interaction.response.is_done():
-        await interaction.followup.send(message)
-    else:
-        await interaction.response.send_message(message, ephemeral=True)
+        description = str(error.original)
+    await send_interaction_error(
+        interaction,
+        title="Play command error",
+        description=description,
+    )
 
 
 load_dotenv()

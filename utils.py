@@ -28,6 +28,8 @@ class TrackRequestItem:
     provider: str
     thumbnail: Optional[str] = None
     stream_bitrate: Optional[int] = None
+    requested_by_name: Optional[str] = None
+    requested_by_avatar: Optional[str] = None
 
 
 @dataclass(slots=True)
