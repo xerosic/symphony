@@ -31,7 +31,7 @@ class SoundCloudSource:
 
         self.ffmpeg_options = {
             "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -reconnect_on_http_error 4xx,5xx -nostdin -loglevel warning -probesize 64k -analyzeduration 0",
-            "options": "-vn -sn -dn -bufsize 512k -ar 48000 -ac 2",
+            "options": "-vn -sn -dn -bufsize 512k",
         }
 
         self.ytdl = yt_dlp.YoutubeDL(self.ytdl_format_options)

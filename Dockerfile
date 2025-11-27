@@ -3,6 +3,8 @@ FROM python:3.12.9-alpine
 # Install system dependencies including FFmpeg, git, and build tools
 RUN apk add --no-cache \
     ffmpeg \
+    opus \
+    opus-dev \
     curl \
     unzip \
     git \
