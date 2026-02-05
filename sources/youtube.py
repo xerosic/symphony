@@ -5,6 +5,7 @@ from collections import OrderedDict
 import os
 from time import time
 from typing import Dict, Optional, Tuple
+from urllib.parse import parse_qs, urlparse
 
 import yt_dlp  # type: ignore[import-untyped]
 from discord import FFmpegPCMAudio, PCMVolumeTransformer
@@ -15,9 +16,6 @@ from utils import StreamInfo, TrackRequestItem
 
 class YouTubeSource:
     def __init__(self) -> None:
-        # YouTube sometimes returns 403 for "bot-like" clients even on residential IPs.
-        # Setting stable, browser-like headers for both yt-dlp extraction and FFmpeg stream
-        # retrieval tends to make playback far more reliable.
         user_agent = os.getenv(
             "SYMPHONY_YT_USER_AGENT",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
@@ -25,7 +23,12 @@ class YouTubeSource:
         referer = os.getenv("SYMPHONY_YT_REFERER", "https://www.youtube.com/")
         origin = os.getenv("SYMPHONY_YT_ORIGIN", "https://www.youtube.com")
 
-        debug = os.getenv("SYMPHONY_YT_DEBUG", "0").lower() in ("1", "true", "yes", "on")
+        debug = os.getenv("SYMPHONY_YT_DEBUG", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
 
         self.ytdl_format_options = {
             "format": "bestaudio/best",
@@ -42,20 +45,17 @@ class YouTubeSource:
             "skip_download": True,
             "max_downloads": 1,
             "playlistend": 1,
-            # Make extractor HTTP requests look like a normal browser.
             "http_headers": {
                 "User-Agent": user_agent,
-                "Accept-Language": os.getenv("SYMPHONY_YT_ACCEPT_LANGUAGE", "en-US,en;q=0.9"),
+                "Accept-Language": os.getenv(
+                    "SYMPHONY_YT_ACCEPT_LANGUAGE", "en-US,en;q=0.9"
+                ),
                 "Referer": referer,
                 "Origin": origin,
             },
-            # YouTube frequently changes the web player flow; using a mobile client can
-            # avoid some 403/consent/bot-check paths.
             "extractor_args": {
                 "youtube": {
-                    "player_client": [
-                        os.getenv("SYMPHONY_YT_PLAYER_CLIENT", "android")
-                    ]
+                    "player_client": [os.getenv("SYMPHONY_YT_PLAYER_CLIENT", "android")]
                 }
             },
         }
@@ -64,28 +64,24 @@ class YouTubeSource:
         if cookiefile:
             self.ytdl_format_options["cookiefile"] = cookiefile
 
-        # Optional: import cookies from a browser profile (e.g. chrome, firefox).
-        # This helps for age-restricted / consent-gated videos.
         cookies_from_browser = os.getenv("SYMPHONY_YT_COOKIES_FROM_BROWSER")
         if cookies_from_browser:
             self.ytdl_format_options["cookiesfrombrowser"] = cookies_from_browser
 
         self.ffmpeg_options = {
-            # Force FFmpeg to use browser-like headers when fetching the signed
-            # googlevideo.com stream URL. Without this, YouTube can reply with 403.
             "before_options": (
-                "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 "
+                "-reconnect 1 -reconnect_at_eof 1 -reconnect_streamed 1 -reconnect_delay_max 5 "
                 "-reconnect_on_http_error 4xx,5xx -nostdin -loglevel warning "
                 "-probesize 64k -analyzeduration 0 "
-                f"-user_agent \"{user_agent}\" "
-                f"-headers \"Referer: {referer}\\r\\nOrigin: {origin}\\r\\n\""
+                f'-user_agent "{user_agent}" '
+                f'-headers "Referer: {referer}\\r\\nOrigin: {origin}\\r\\n"'
             ),
             "options": "-vn -sn -dn -bufsize 512k",
         }
 
         self.ytdl = yt_dlp.YoutubeDL(self.ytdl_format_options)
         self._stream_cache: "OrderedDict[str, Tuple[StreamInfo, float]]" = OrderedDict()
-        self._cache_ttl = 900  # seconds
+        self._cache_ttl = int(os.getenv("SYMPHONY_STREAM_CACHE_TTL", "900"))  # seconds
         self._cache_max_entries = 128
         self._inflight: Dict[str, asyncio.Task[StreamInfo]] = {}
 
@@ -121,7 +117,9 @@ class YouTubeSource:
             if isinstance(exc, yt_dlp.utils.DownloadError):
                 error_text = str(exc)
                 if "403" in error_text or "forbidden" in error_text.lower():
-                    logger.error(f"youTube 403 while searching: {query} :: {error_text}")
+                    logger.error(
+                        f"youTube 403 while searching: {query} :: {error_text}"
+                    )
                     raise ValueError(
                         "❌ YouTube rejected the request (403 Forbidden). This is usually bot/consent enforcement rather than an IP ban. "
                         "Try updating yt-dlp and/or providing cookies (see README troubleshooting)."
@@ -188,7 +186,9 @@ class YouTubeSource:
             if isinstance(exc, yt_dlp.utils.DownloadError):
                 error_text = str(exc)
                 if "403" in error_text or "forbidden" in error_text.lower():
-                    logger.error(f"youTube 403 while resolving stream: {url} :: {error_text}")
+                    logger.error(
+                        f"youTube 403 while resolving stream: {url} :: {error_text}"
+                    )
                     raise ValueError(
                         "❌ YouTube rejected the request (403 Forbidden). This is usually bot/consent enforcement rather than an IP ban. "
                         "Try updating yt-dlp and/or providing cookies (see README troubleshooting)."
@@ -207,10 +207,13 @@ class YouTubeSource:
             raise
 
     def _extract_stream_url(self, data: dict) -> str:
-        if data.get("url"):
-            return data["url"]
+        # Prefer the format yt-dlp actually selected for "bestaudio".
+        requested_formats = data.get("requested_formats")
+        formats = []
+        if isinstance(requested_formats, list):
+            formats.extend(requested_formats)
 
-        formats = data.get("formats") or []
+        formats.extend(data.get("formats") or [])
         audio_formats = [
             fmt
             for fmt in formats
@@ -218,6 +221,8 @@ class YouTubeSource:
         ]
 
         if not audio_formats:
+            if data.get("url"):
+                return data["url"]
             raise ValueError("No valid audio stream found for YouTube track")
 
         audio_formats.sort(key=lambda fmt: fmt.get("abr", 0), reverse=True)
@@ -241,8 +246,31 @@ class YouTubeSource:
             return None
         return stream
 
+    def _extract_url_expiry(self, stream_url: str) -> Optional[float]:
+        try:
+            parsed = urlparse(stream_url)
+            query = parse_qs(parsed.query)
+            expires = query.get("expire")
+            if not expires or not expires[0]:
+                return None
+            return float(int(expires[0]))
+        except Exception:
+            return None
+
     def _remember_stream(self, cache_key: str, stream: StreamInfo) -> None:
-        self._stream_cache[cache_key] = (stream, time() + self._cache_ttl)
+        now = time()
+        ttl_expires_at = now + self._cache_ttl
+
+        # If the signed googlevideo URL has its own expiry, honor it.
+        url_expires_at = self._extract_url_expiry(stream.stream_url)
+        if url_expires_at:
+            # Keep a small safety margin to avoid starting playback with a near-expiry URL.
+            url_expires_at = max(now, url_expires_at - 60)
+            expires_at = min(ttl_expires_at, url_expires_at)
+        else:
+            expires_at = ttl_expires_at
+
+        self._stream_cache[cache_key] = (stream, expires_at)
         self._stream_cache.move_to_end(cache_key)
         if len(self._stream_cache) > self._cache_max_entries:
             self._stream_cache.popitem(last=False)
