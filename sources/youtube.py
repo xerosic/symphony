@@ -74,7 +74,7 @@ class YouTubeSource:
                 "-reconnect_on_http_error 4xx,5xx -nostdin -loglevel warning "
                 "-probesize 64k -analyzeduration 0 "
                 f'-user_agent "{user_agent}" '
-                f'-headers "Referer: {referer}\\r\\nOrigin: {origin}\\r\\n"'
+                f'-referer "{referer}"'
             ),
             "options": "-vn -sn -dn -bufsize 512k",
         }
