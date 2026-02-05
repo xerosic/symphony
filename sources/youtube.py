@@ -30,6 +30,19 @@ class YouTubeSource:
             "on",
         )
 
+        player_clients_env = os.getenv("SYMPHONY_YT_PLAYER_CLIENTS")
+        if player_clients_env:
+            player_clients = [
+                client.strip()
+                for client in player_clients_env.split(",")
+                if client.strip()
+            ]
+        else:
+            # Default to web to avoid the Android PO Token requirement.
+            player_clients = [os.getenv("SYMPHONY_YT_PLAYER_CLIENT", "web")]
+
+        po_token = os.getenv("SYMPHONY_YT_PO_TOKEN")
+
         self.ytdl_format_options = {
             "format": "bestaudio/best",
             "noplaylist": True,
@@ -55,7 +68,8 @@ class YouTubeSource:
             },
             "extractor_args": {
                 "youtube": {
-                    "player_client": [os.getenv("SYMPHONY_YT_PLAYER_CLIENT", "android")]
+                    "player_client": player_clients,
+                    **({"po_token": [po_token]} if po_token else {}),
                 }
             },
         }

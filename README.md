@@ -112,6 +112,10 @@ YouTube can return `403` even on residential IPs. This is typically automated-tr
    - Non-docker: `SYMPHONY_YT_COOKIEFILE=/path/to/cookies.txt`
    - Alternative: `SYMPHONY_YT_COOKIES_FROM_BROWSER=chrome` (also supports `firefox`, etc.)
 
+If you enabled debug logs and see a warning about a **PO Token** (e.g. Android client requiring `GVS PO Token`), either:
+- Switch the player client to `web` (default) or configure a fallback list with `SYMPHONY_YT_PLAYER_CLIENTS=web,ios`
+- Or provide a token via `SYMPHONY_YT_PO_TOKEN` (advanced; see yt-dlp PO Token guide)
+
 
 ## 📝 License
 
