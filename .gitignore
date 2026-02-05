@@ -25,3 +25,6 @@ wheels/
 htmlcov/
 .venv
 .mypy_cache/
+
+# runtime data (keep folder, ignore secrets)
+data/cookies*.txt

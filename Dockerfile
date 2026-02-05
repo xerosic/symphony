@@ -1,18 +1,18 @@
 FROM python:3.12.9-alpine
 
-# Install system dependencies including FFmpeg, git, and build tools
+# Install runtime deps (keep) + temporary build deps (remove later)
 RUN apk add --no-cache \
-    ffmpeg \
-    opus \
-    opus-dev \
-    curl \
-    unzip \
-    git \
-    gcc \
-    deno \
-    musl-dev \
-    linux-headers \
-    && rm -rf /var/cache/apk/*
+        ffmpeg \
+        opus \
+        curl \
+        unzip \
+        git \
+        deno \
+    && apk add --no-cache --virtual .build-deps \
+        gcc \
+        musl-dev \
+        linux-headers \
+        opus-dev
 
 # Set working directory
 WORKDIR /app
@@ -21,10 +21,8 @@ WORKDIR /app
 COPY requirements.txt .
 
 # Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Install yt-dlp from source
-RUN pip install git+https://github.com/yt-dlp/yt-dlp.git
+RUN pip install --no-cache-dir -r requirements.txt \
+    && apk del .build-deps
 
 # Create non-root user for security
 RUN adduser -D -u 1000 botuser && chown -R botuser:botuser /app

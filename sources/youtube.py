@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
+import os
 from time import time
 from typing import Dict, Optional, Tuple
 
@@ -14,14 +15,26 @@ from utils import StreamInfo, TrackRequestItem
 
 class YouTubeSource:
     def __init__(self) -> None:
+        # YouTube sometimes returns 403 for "bot-like" clients even on residential IPs.
+        # Setting stable, browser-like headers for both yt-dlp extraction and FFmpeg stream
+        # retrieval tends to make playback far more reliable.
+        user_agent = os.getenv(
+            "SYMPHONY_YT_USER_AGENT",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        )
+        referer = os.getenv("SYMPHONY_YT_REFERER", "https://www.youtube.com/")
+        origin = os.getenv("SYMPHONY_YT_ORIGIN", "https://www.youtube.com")
+
+        debug = os.getenv("SYMPHONY_YT_DEBUG", "0").lower() in ("1", "true", "yes", "on")
+
         self.ytdl_format_options = {
             "format": "bestaudio/best",
             "noplaylist": True,
             "nocheckcertificate": True,
             "ignoreerrors": False,
-            "logtostderr": False,
-            "quiet": True,
-            "no_warnings": True,
+            "logtostderr": debug,
+            "quiet": not debug,
+            "no_warnings": not debug,
             "default_search": "auto",
             "source_address": "0.0.0.0",
             "geo_bypass": True,
@@ -29,10 +42,44 @@ class YouTubeSource:
             "skip_download": True,
             "max_downloads": 1,
             "playlistend": 1,
+            # Make extractor HTTP requests look like a normal browser.
+            "http_headers": {
+                "User-Agent": user_agent,
+                "Accept-Language": os.getenv("SYMPHONY_YT_ACCEPT_LANGUAGE", "en-US,en;q=0.9"),
+                "Referer": referer,
+                "Origin": origin,
+            },
+            # YouTube frequently changes the web player flow; using a mobile client can
+            # avoid some 403/consent/bot-check paths.
+            "extractor_args": {
+                "youtube": {
+                    "player_client": [
+                        os.getenv("SYMPHONY_YT_PLAYER_CLIENT", "android")
+                    ]
+                }
+            },
         }
 
+        cookiefile = os.getenv("SYMPHONY_YT_COOKIEFILE")
+        if cookiefile:
+            self.ytdl_format_options["cookiefile"] = cookiefile
+
+        # Optional: import cookies from a browser profile (e.g. chrome, firefox).
+        # This helps for age-restricted / consent-gated videos.
+        cookies_from_browser = os.getenv("SYMPHONY_YT_COOKIES_FROM_BROWSER")
+        if cookies_from_browser:
+            self.ytdl_format_options["cookiesfrombrowser"] = cookies_from_browser
+
         self.ffmpeg_options = {
-            "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -reconnect_on_http_error 4xx,5xx -nostdin -loglevel warning -probesize 64k -analyzeduration 0",
+            # Force FFmpeg to use browser-like headers when fetching the signed
+            # googlevideo.com stream URL. Without this, YouTube can reply with 403.
+            "before_options": (
+                "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 "
+                "-reconnect_on_http_error 4xx,5xx -nostdin -loglevel warning "
+                "-probesize 64k -analyzeduration 0 "
+                f"-user_agent \"{user_agent}\" "
+                f"-headers \"Referer: {referer}\\r\\nOrigin: {origin}\\r\\n\""
+            ),
             "options": "-vn -sn -dn -bufsize 512k",
         }
 
@@ -73,6 +120,12 @@ class YouTubeSource:
         except Exception as exc:
             if isinstance(exc, yt_dlp.utils.DownloadError):
                 error_text = str(exc)
+                if "403" in error_text or "forbidden" in error_text.lower():
+                    logger.error(f"youTube 403 while searching: {query} :: {error_text}")
+                    raise ValueError(
+                        "❌ YouTube rejected the request (403 Forbidden). This is usually bot/consent enforcement rather than an IP ban. "
+                        "Try updating yt-dlp and/or providing cookies (see README troubleshooting)."
+                    ) from exc
                 if any(
                     token in error_text.lower()
                     for token in ("404", "not found", "unavailable")
@@ -134,6 +187,12 @@ class YouTubeSource:
         except Exception as exc:
             if isinstance(exc, yt_dlp.utils.DownloadError):
                 error_text = str(exc)
+                if "403" in error_text or "forbidden" in error_text.lower():
+                    logger.error(f"youTube 403 while resolving stream: {url} :: {error_text}")
+                    raise ValueError(
+                        "❌ YouTube rejected the request (403 Forbidden). This is usually bot/consent enforcement rather than an IP ban. "
+                        "Try updating yt-dlp and/or providing cookies (see README troubleshooting)."
+                    ) from exc
                 if any(
                     token in error_text.lower()
                     for token in ("404", "not found", "unavailable")

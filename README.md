@@ -37,6 +37,13 @@ services:
     container_name: symphony-bot
     environment:
       - DISCORD_TOKEN=YOUR_TOKEN_HERE
+         # Optional (recommended if you hit YouTube 403 / age-gated / consent-gated videos)
+         - SYMPHONY_YT_COOKIEFILE=/data/cookies.txt
+         # Enable to get yt-dlp debug logs in container output
+         # - SYMPHONY_YT_DEBUG=1
+      volumes:
+         # Put cookies at ./data/cookies.txt on the host
+         - ./data:/data:ro
     restart: unless-stopped
 ```
 
@@ -92,6 +99,18 @@ Pre-built Docker images are automatically published to GitHub Container Registry
 
 - `ghcr.io/xerosic/symphony:latest` - Latest stable version
 - `ghcr.io/xerosic/symphony:main` - Latest main branch
+
+## 🛠️ Troubleshooting
+
+### YouTube `403 Forbidden`
+
+YouTube can return `403` even on residential IPs. This is typically automated-traffic enforcement (client fingerprint, missing cookies/consent, request patterns), not a simple IP ban.
+
+- Update `yt-dlp` to the latest version (YouTube frequently changes internals): `pip install -U yt-dlp`
+- If specific videos are age/consent gated, provide cookies:
+   - Docker: mount `./data/cookies.txt` into the container and set `SYMPHONY_YT_COOKIEFILE=/data/cookies.txt`
+   - Non-docker: `SYMPHONY_YT_COOKIEFILE=/path/to/cookies.txt`
+   - Alternative: `SYMPHONY_YT_COOKIES_FROM_BROWSER=chrome` (also supports `firefox`, etc.)
 
 
 ## 📝 License

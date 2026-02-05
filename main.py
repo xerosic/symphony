@@ -336,7 +336,9 @@ async def play(interaction: discord.Interaction, query: str, provider: str = "au
 
         channel = interaction.channel
         if channel is None or not isinstance(channel, Messageable):
-            raise RuntimeError("Unable to determine the text channel for this interaction.")
+            raise RuntimeError(
+                "Unable to determine the text channel for this interaction."
+            )
 
         requester_name = interaction.user.display_name
         requester_avatar = (
